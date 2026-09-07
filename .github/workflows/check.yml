@@ -1,37 +1,34 @@
-name: UN Unifeed check
+name: AP YouTube check
 
 on:
-  # Triggered externally by cron-job.org every ~5 min via the workflow_dispatch
-  # API — GitHub's own `schedule:` cron is best-effort and only fires every
-  # 60–90 min, too slow. To add a built-in backup, uncomment:
-  #   schedule:
-  #     - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       seed_and_post:
-        description: "Post existing results on this run (1 = yes). Normally leave blank."
+        description: "Post existing results on this run (1 = yes)"
         required: false
-        default: ""
+        default: "0"
+  schedule:
+    # Every 15 minutes. GitHub Actions doesn't guarantee exact timing on
+    # scheduled runs (it can lag under load), but that's fine for this —
+    # dedupe is handled by state.json, not by timing.
+    - cron: "*/15 * * * *"
 
-# Allow the job to commit the updated state.json back to the repo.
 permissions:
   contents: write
 
-# Never run two checks at once (would race on state.json).
 concurrency:
-  group: unifeed-check
+  group: ap-youtube-check
   cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      # Pinned to commit SHAs (not mutable tags) for supply-chain safety.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -39,16 +36,16 @@ jobs:
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           SEED_AND_POST: ${{ github.event.inputs.seed_and_post }}
-        run: python unifeed_check.py
+        run: python ap_youtube_check.py
 
       - name: Persist state
         run: |
-          if [[ -n "$(git status --porcelain state.json)" ]]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- state.json; then
             git add state.json
-            git commit -m "Update Unifeed watcher state [skip ci]"
+            git commit -m "Update state.json [skip ci]"
             git push
           else
-            echo "No state change to commit."
+            echo "No state changes."
           fi
