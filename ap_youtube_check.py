@@ -22,6 +22,7 @@ import html
 import json
 import os
 import sys
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -47,6 +48,15 @@ USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
              "ap-youtube-alerts/1.0")
 
 MAX_DESC_CHARS = 400
+
+# YouTube's Atom feed intermittently returns 404/5xx (or an empty feed) to
+# cloud IPs like GitHub's runners. Retry a few times within a run, and if it
+# still fails, skip quietly unless the feed has been unreachable/stale for a
+# long time — that way a blip doesn't trigger a "Run failed" email, but a
+# real outage still does.
+FETCH_ATTEMPTS = 4
+FETCH_BACKOFF_SECS = 5          # 5s, 10s, 20s between attempts
+STALE_ALERT_HOURS = 6           # fail the run if nothing new for this long
 
 NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -119,6 +129,45 @@ def parse_dt(value):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def fetch_items_with_retry():
+    """fetch_items() with retries. Returns the item list (possibly empty);
+    raises the last error if every attempt raised."""
+    last_err = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            items = fetch_items()
+            if items:
+                return items
+            last_err = None
+            log(f"Attempt {attempt}: feed parsed but had 0 items.")
+        except Exception as e:
+            last_err = e
+            log(f"Attempt {attempt}: fetch/parse failed: {e}")
+        if attempt < FETCH_ATTEMPTS:
+            time.sleep(FETCH_BACKOFF_SECS * 2 ** (attempt - 1))
+    if last_err:
+        raise last_err
+    return []
+
+
+def soft_fail(reason, state):
+    """Decide the exit code for a run where the feed couldn't be read.
+    Exit 0 (with a warning annotation) for a transient blip; exit 1 only if
+    the last video we saw is older than STALE_ALERT_HOURS."""
+    last = parse_dt((state or {}).get("last_published"))
+    if last is not None:
+        age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+        if age_h < STALE_ALERT_HOURS:
+            log(f"::warning::{reason} Treating as transient "
+                f"(last video {age_h:.1f}h ago); state not advanced.")
+            return 0
+        log(f"ERROR: {reason} Last video was {age_h:.1f}h ago "
+            f"(>{STALE_ALERT_HOURS}h) — the feed may be genuinely broken.")
+        return 1
+    log(f"ERROR: {reason}")
+    return 1
 
 
 def fetch_items():
@@ -226,18 +275,17 @@ def main():
         log("ERROR: TEAMS_WEBHOOK_URL must be set.")
         return 1
 
+    state = load_state()
+
     try:
-        items = fetch_items()
+        items = fetch_items_with_retry()
     except Exception as e:
-        log(f"ERROR fetching/parsing feed: {e}")
-        return 1
+        return soft_fail(f"Could not fetch/parse feed after {FETCH_ATTEMPTS} attempts ({e}).", state)
 
     log(f"Fetched {len(items)} item(s) from feed.")
     if not items:
-        log("WARNING: parsed 0 items — treating as a bad fetch, not advancing state.")
-        return 1
+        return soft_fail(f"Feed returned 0 items after {FETCH_ATTEMPTS} attempts.", state)
 
-    state = load_state()
     first_run = state is None
     if first_run:
         state = {"last_published": None, "seen_ids": []}

@@ -1,0 +1,51 @@
+name: AP YouTube check
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_and_post:
+        description: "Post existing results on this run (1 = yes)"
+        required: false
+        default: "0"
+  schedule:
+    # Every 15 minutes. GitHub Actions doesn't guarantee exact timing on
+    # scheduled runs (it can lag under load), but that's fine for this —
+    # dedupe is handled by state.json, not by timing.
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ap-youtube-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run checker
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          SEED_AND_POST: ${{ github.event.inputs.seed_and_post }}
+        run: python ap_youtube_check.py
+
+      - name: Persist state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- state.json; then
+            git add state.json
+            git commit -m "Update state.json [skip ci]"
+            git push
+          else
+            echo "No state changes."
+          fi
